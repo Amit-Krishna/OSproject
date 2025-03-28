@@ -1,0 +1,290 @@
+import networkx as nx
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import tkinter as tk
+from tkinter import messagebox, scrolledtext
+import time
+
+class ResourceAllocationSimulator:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Resource Allocation Graph Simulator")
+        self.G = nx.DiGraph()
+        self.processes = {}
+        self.resources = {}
+        self.deadlock_flag = False
+        self.step_mode = False
+        self.step_queue = []
+        self.flash_state = True
+        self.setup_gui()
+        self.plot_graph()
+
+    def setup_gui(self):
+        self.main_frame = tk.Frame(self.root)
+        self.main_frame.pack(expand=True, fill="both")
+        self.fig, self.ax = plt.subplots(figsize=(8, 6))
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.main_frame)
+        self.canvas.get_tk_widget().pack(side=tk.LEFT, expand=True, fill="both")
+        self.control_frame = tk.Frame(self.main_frame)
+        self.control_frame.pack(side=tk.RIGHT, fill="y", padx=10, pady=10)
+        tk.Button(self.control_frame, text="Add Process", command=self.add_process).pack(pady=5)
+        tk.Button(self.control_frame, text="Add Resource", command=self.add_resource).pack(pady=5)
+        tk.Button(self.control_frame, text="Allocate", command=self.allocate_resource).pack(pady=5)
+        tk.Button(self.control_frame, text="Wait Allocation", command=self.wait_allocation).pack(pady=5)
+        tk.Button(self.control_frame, text="Release", command=self.release_resource).pack(pady=5)
+        tk.Button(self.control_frame, text="Toggle Step Mode", command=self.toggle_step_mode).pack(pady=5)
+        tk.Button(self.control_frame, text="Clear Graph", command=self.clear_graph).pack(pady=5)
+        self.step_button = tk.Button(self.control_frame, text="Next Step", command=self.execute_step)
+        self.process_listbox = tk.Listbox(self.control_frame, height=5)
+        self.process_listbox.pack(pady=5)
+        self.resource_listbox = tk.Listbox(self.control_frame, height=5)
+        self.resource_listbox.pack(pady=5)
+        self.log_text = scrolledtext.ScrolledText(self.control_frame, width=30, height=10)
+        self.log_text.pack(pady=5)
+        self.log_action("Simulator initialized")
+        self.canvas.mpl_connect("button_press_event", self.on_press)
+        self.canvas.mpl_connect("button_release_event", self.on_release)
+        self.selected_node = None
+        self.root.after(500, self.animate_deadlock)
+
+    def log_action(self, message):
+        self.log_text.insert(tk.END, f"{time.ctime()}: {message}\n")
+        self.log_text.see(tk.END)
+
+    def add_process(self):
+        pid = f"P{len(self.processes) + 1}"
+        self.processes[pid] = "active"
+        self.G.add_node(pid, type="process")
+        self.process_listbox.insert(tk.END, pid)
+        self.log_action(f"Added process {pid}")
+        self.plot_graph()
+
+    def add_resource(self):
+        rid = f"R{len(self.resources) + 1}"
+        self.resources[rid] = "free"
+        self.G.add_node(rid, type="resource")
+        self.resource_listbox.insert(tk.END, rid)
+        self.log_action(f"Added resource {rid}")
+        self.plot_graph()
+
+    def allocate_resource(self):
+        if not self.process_listbox.size() or not self.resource_listbox.size():
+            messagebox.showwarning("Warning", "Add processes and resources first.")
+            return
+        selected_process = self.process_listbox.get(tk.ACTIVE) if self.process_listbox.get(tk.ACTIVE) else self.process_listbox.get(0)
+        selected_resource = self.resource_listbox.get(tk.ACTIVE) if self.resource_listbox.get(tk.ACTIVE) else self.resource_listbox.get(0)
+        
+        if self.resources[selected_resource] != "free":
+            messagebox.showwarning("Warning", f"{selected_resource} is already allocated.")
+            return
+        
+        if self.step_mode:
+            self.step_queue.append(("allocate", selected_process, selected_resource))
+            self.log_action(f"Queued allocation: {selected_resource} -> {selected_process}")
+        else:
+            self.G.add_edge(selected_resource, selected_process, type="allocation")  # R -> P
+            self.resources[selected_resource] = "allocated"
+            self.log_action(f"Allocated {selected_resource} to {selected_process}")
+            self.plot_graph()
+
+    def wait_allocation(self):
+        if not self.process_listbox.size() or not self.resource_listbox.size():
+            messagebox.showwarning("Warning", "Add processes and resources first.")
+            return
+        selected_process = self.process_listbox.get(tk.ACTIVE) if self.process_listbox.get(tk.ACTIVE) else self.process_listbox.get(0)
+        selected_resource = self.resource_listbox.get(tk.ACTIVE) if self.resource_listbox.get(tk.ACTIVE) else self.resource_listbox.get(0)
+        
+        if self.resources[selected_resource] == "free":
+            messagebox.showwarning("Warning", f"{selected_resource} is free. Use 'Allocate' instead.")
+            return
+        if self.G.has_edge(selected_process, selected_resource):
+            messagebox.showwarning("Warning", f"{selected_process} already requests {selected_resource}.")
+            return
+        
+        if self.step_mode:
+            self.step_queue.append(("wait", selected_process, selected_resource))
+            self.log_action(f"Queued wait allocation: {selected_process} -> {selected_resource}")
+        else:
+            self.G.add_edge(selected_process, selected_resource, type="wait")  # P -> R
+            self.log_action(f"{selected_process} is now waiting for {selected_resource}")
+            self.plot_graph()
+
+    def release_resource(self):
+        if not self.process_listbox.size() or not self.resource_listbox.size():
+            messagebox.showwarning("Warning", "Add processes and resources first.")
+            return
+        selected_process = self.process_listbox.get(tk.ACTIVE) if self.process_listbox.get(tk.ACTIVE) else self.process_listbox.get(0)
+        selected_resource = self.resource_listbox.get(tk.ACTIVE) if self.resource_listbox.get(tk.ACTIVE) else self.resource_listbox.get(0)
+        if self.G.has_edge(selected_resource, selected_process):  # Check R -> P for allocation
+            if self.step_mode:
+                self.step_queue.append(("release", selected_process, selected_resource))
+                self.log_action(f"Queued release: {selected_resource} -> {selected_process}")
+            else:
+                self.G.remove_edge(selected_resource, selected_process)
+                if not list(self.G.successors(selected_resource)):  # No process holds this resource
+                    self.resources[selected_resource] = "free"
+                    self.log_action(f"Released {selected_resource} from {selected_process} - now free")
+                self.plot_graph()
+        elif self.G.has_edge(selected_process, selected_resource):  # Check P -> R for wait
+            if self.step_mode:
+                self.step_queue.append(("release", selected_process, selected_resource))
+                self.log_action(f"Queued release wait: {selected_process} -> {selected_resource}")
+            else:
+                self.G.remove_edge(selected_process, selected_resource)
+                self.log_action(f"Released wait of {selected_process} for {selected_resource}")
+                self.plot_graph()
+
+    def toggle_step_mode(self):
+        self.step_mode = not self.step_mode
+        if self.step_mode:
+            self.step_button.pack(pady=5)
+            self.log_action("Step mode enabled")
+        else:
+            self.step_button.pack_forget()
+            self.step_queue.clear()
+            self.log_action("Step mode disabled")
+            self.plot_graph()
+
+    def execute_step(self):
+        if self.step_queue:
+            action, process, resource = self.step_queue.pop(0)
+            if action == "allocate":
+                if self.resources[resource] != "free":
+                    self.log_action(f"Step: Cannot allocate {resource} to {process} - already allocated")
+                    return
+                self.G.add_edge(resource, process, type="allocation")  # R -> P
+                self.resources[resource] = "allocated"
+                self.log_action(f"Step: Allocated {resource} to {process}")
+            elif action == "wait":
+                if self.resources[resource] == "free":
+                    self.log_action(f"Step: Cannot wait for {resource} - it is free")
+                    return
+                if self.G.has_edge(process, resource):
+                    self.log_action(f"Step: {process} already requests {resource}")
+                    return
+                self.G.add_edge(process, resource, type="wait")  # P -> R
+                self.log_action(f"Step: {process} is now waiting for {resource}")
+            elif action == "release":
+                if self.G.has_edge(resource, process):  # R -> P
+                    self.G.remove_edge(resource, process)
+                    if not list(self.G.successors(resource)):
+                        self.resources[resource] = "free"
+                        self.log_action(f"Step: Released {resource} from {process} - now free")
+                elif self.G.has_edge(process, resource):  # P -> R
+                    self.G.remove_edge(process, resource)
+                    self.log_action(f"Step: Released wait of {process} for {resource}")
+            self.plot_graph()
+
+    def clear_graph(self):
+        self.G.clear()
+        self.processes.clear()
+        self.resources.clear()
+        self.deadlock_flag = False
+        self.step_queue.clear()
+        self.process_listbox.delete(0, tk.END)
+        self.resource_listbox.delete(0, tk.END)
+        self.log_action("Graph cleared")
+        self.plot_graph()
+
+    def plot_graph(self):
+        self.ax.clear()
+        pos = nx.spring_layout(self.G, k=0.5, iterations=50)
+        node_colors = []
+        node_sizes = []
+        for node in self.G.nodes:
+            if self.G.nodes[node]["type"] == "process":
+                node_colors.append("blue")
+                node_sizes.append(500)
+            else:
+                node_colors.append("red" if self.resources[node] == "free" else "orange")
+                node_sizes.append(800)
+        allocation_edges = [(u, v) for u, v, d in self.G.edges(data=True) if d["type"] == "allocation"]
+        wait_edges = [(u, v) for u, v, d in self.G.edges(data=True) if d["type"] == "wait"]
+        nx.draw_networkx_nodes(self.G, pos, ax=self.ax, node_color=node_colors, node_size=node_sizes)
+        nx.draw_networkx_edges(self.G, pos, ax=self.ax, edgelist=allocation_edges, edge_color="black", arrows=True)
+        nx.draw_networkx_edges(self.G, pos, ax=self.ax, edgelist=wait_edges, edge_color="gray", style="dashed", arrows=True)
+        nx.draw_networkx_labels(self.G, pos, ax=self.ax, font_size=10)
+        print("Edges:", list(self.G.edges(data=True)))
+        self.detect_deadlock(pos)
+        self.canvas.draw()
+
+    def detect_deadlock(self, pos):
+        if not self.G.edges():
+            self.deadlock_flag = False
+            print("No edges, no deadlock possible")
+            return
+        try:
+            cycles = list(nx.simple_cycles(self.G))
+            print("Cycles found:", cycles)
+            valid_deadlock = False
+            deadlock_cycle = None
+            for cycle in cycles:
+                all_allocated = all(
+                    self.G.nodes[node]["type"] == "process" or 
+                    (self.G.nodes[node]["type"] == "resource" and self.resources[node] == "allocated") 
+                    for node in cycle
+                )
+                print(f"Cycle {cycle}: all_allocated = {all_allocated}")
+                if all_allocated and len(cycle) > 1 and any(self.G.nodes[n]["type"] == "process" for n in cycle):
+                    valid_deadlock = True
+                    deadlock_cycle = cycle
+                    break
+            if valid_deadlock:
+                if not self.deadlock_flag:
+                    self.deadlock_flag = True
+                    cycle_str = " -> ".join(deadlock_cycle) + " -> " + deadlock_cycle[0]
+                    print(f"Deadlock detected: {cycle_str}")
+                    messagebox.showerror("Deadlock Detected", "A deadlock has occurred!")
+                    self.log_action(f"Deadlock detected: {cycle_str}")
+            else:
+                self.deadlock_flag = False
+                print("No valid deadlock found")
+            
+            if self.deadlock_flag and deadlock_cycle:
+                nx.draw_networkx_nodes(self.G, pos, nodelist=deadlock_cycle, 
+                                       node_color="yellow" if self.flash_state else "red", 
+                                       node_size=700, ax=self.ax)
+        except Exception as e:
+            self.log_action(f"Error detecting deadlock: {e}")
+            print(f"Exception in deadlock detection: {e}")
+
+    def animate_deadlock(self):
+        if self.deadlock_flag:
+            self.flash_state = not self.flash_state
+            print(f"Animating: flash_state = {self.flash_state}")
+            self.plot_graph()
+            self.root.update()  # Force GUI update
+        self.root.after(500, self.animate_deadlock)
+
+    def on_press(self, event):
+        if event.inaxes != self.ax:
+            return
+        pos = nx.spring_layout(self.G)
+        for node, (x, y) in pos.items():
+            if abs(x - event.xdata) < 0.2 and abs(y - event.ydata) < 0.2:
+                self.selected_node = node
+                break
+
+    def on_release(self, event):
+        if self.selected_node and event.inaxes == self.ax:
+            pos = nx.spring_layout(self.G)
+            for node, (x, y) in pos.items():
+                if abs(x - event.xdata) < 0.2 and abs(y - event.ydata) < 0.2 and node != self.selected_node:
+                    if self.G.nodes[self.selected_node]["type"] == "process" and self.G.nodes[node]["type"] == "resource":
+                        if self.resources[node] == "free":
+                            self.G.add_edge(node, self.selected_node, type="allocation")  # R -> P
+                            self.resources[node] = "allocated"
+                            self.log_action(f"Drag-drop allocated {node} to {self.selected_node}")
+                        elif not self.G.has_edge(self.selected_node, node):
+                            self.G.add_edge(self.selected_node, node, type="wait")  # P -> R
+                            self.log_action(f"Drag-drop: {self.selected_node} is now waiting for {node}")
+                        self.plot_graph()
+        self.selected_node = None
+
+def run_gui():
+    root = tk.Tk()
+    app = ResourceAllocationSimulator(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    run_gui()
